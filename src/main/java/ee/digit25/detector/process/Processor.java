@@ -61,17 +61,17 @@ public class Processor {
                                 if (isLegitimate) {
                                     // Queue for batch verification instead of immediate API call
                                     verifier.verify(transactionId);
-                                    log.debug("Transaction {} queued for verification", transactionId);
+                                    //log.debug("Transaction {} queued for verification", transactionId);
                                 } else {
                                     // Queue for batch rejection instead of immediate API call
                                     verifier.reject(transactionId);
-                                    log.debug("Transaction {} queued for rejection", transactionId);
+                                    //log.debug("Transaction {} queued for rejection", transactionId);
                                 }
                             } catch (Exception e) {
                                 log.error("Failed to process transaction {}: {}", transactionId, e.getMessage(), e);
                             }
                         }, executorService))
-                .collect(Collectors.toList());
+                .toList();
 
         // Wait for all processing to complete before ending the scheduled method
         // Using exceptionally to ensure we don't silently fail
