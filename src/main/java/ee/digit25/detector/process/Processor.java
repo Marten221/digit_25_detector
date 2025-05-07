@@ -60,16 +60,16 @@ public class Processor {
 
         // Process results when all validations complete
         allFutures.thenRun(() -> {
-            List<Transaction> acceptTransactions = new ArrayList<>();
-            List<Transaction> rejectTransactions = new ArrayList<>();
+            List<String> acceptTransactions = new ArrayList<>();
+            List<String> rejectTransactions = new ArrayList<>();
 
             futures.forEach(future -> {
                 try {
                     TransactionResult result = future.get();
                     if (result.isLegitimate()) {
-                        acceptTransactions.add(result.getTransaction());
+                        acceptTransactions.add(result.getTransaction().getId());
                     } else {
-                        rejectTransactions.add(result.getTransaction());
+                        rejectTransactions.add(result.getTransaction().getId());
                     }
                 } catch (Exception e) {
                     log.error("Error processing transaction", e);
