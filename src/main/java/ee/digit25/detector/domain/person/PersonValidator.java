@@ -31,6 +31,6 @@ public class PersonValidator {
     }
 
     public boolean isValid(String personCode) {
-        return !hasWarrantIssued(personCode) && hasContract(personCode) && !isBlacklisted(personCode);
+        return !isBlacklisted(personCode) && !hasWarrantIssued(personCode) && hasContract(personCode);
     }
 }

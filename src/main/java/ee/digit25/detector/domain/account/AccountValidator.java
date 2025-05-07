@@ -16,23 +16,19 @@ public class AccountValidator {
 
     public boolean isValidSenderAccount(String accountNumber, BigDecimal amount, String senderPersonCode) {
         log.info("Checking if account {} is valid sender account", accountNumber);
-        boolean isValid = true;
 
-        isValid &= !isClosed(accountNumber);
-        isValid &= isOwner(accountNumber, senderPersonCode);
-        isValid &= hasBalance(accountNumber, amount);
-
-        return isValid;
+        if (isClosed(accountNumber)) {
+            return false;
+        } else if (!isOwner(accountNumber, senderPersonCode)) {
+            return false;
+        } else return hasBalance(accountNumber, amount);
     }
 
     public boolean isValidRecipientAccount(String accountNumber, String recipientPersonCode) {
         log.info("Checking if account {} is valid recipient account", accountNumber);
-        boolean isValid = true;
-
-        isValid &= !isClosed(accountNumber);
-        isValid &= isOwner(accountNumber, recipientPersonCode);
-
-        return isValid;
+        if (isClosed(accountNumber)) {
+            return false;
+        } else return isOwner(accountNumber, recipientPersonCode);
     }
 
     private boolean isOwner(String accountNumber, String senderPersonCode) {
