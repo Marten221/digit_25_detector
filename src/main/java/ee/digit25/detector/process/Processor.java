@@ -20,7 +20,7 @@ import java.util.stream.Collectors;
 public class Processor {
 
     // Increased batch size for better throughput
-    private final int TRANSACTION_BATCH_SIZE = 16;
+    private final int TRANSACTION_BATCH_SIZE = 24;
 
     // Create a thread pool for parallel processing with proper naming
     private final ExecutorService executorService = Executors.newFixedThreadPool(
