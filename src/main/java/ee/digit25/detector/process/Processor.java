@@ -11,35 +11,98 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class Processor {
 
-    private final int TRANSACTION_BATCH_SIZE = 2;
+    // Increased from 1 to process more transactions in each batch
+    private final int TRANSACTION_BATCH_SIZE = 10;
+
+    // Create a thread pool for parallel processing
+    // Adjust thread count based on your CPU cores and workload
+    private final ExecutorService executorService = Executors.newFixedThreadPool(
+            Math.max(4, Runtime.getRuntime().availableProcessors())
+    );
+
     private final TransactionRequester requester;
     private final TransactionValidator validator;
     private final TransactionVerifier verifier;
 
-    @Scheduled(fixedDelay = 10) //Runs every 1000 ms after the last run
+    @Scheduled(fixedDelay = 100) // Changed from 10ms to 100ms to reduce overhead
     public void process() {
         log.info("Starting to process a batch of transactions of size {}", TRANSACTION_BATCH_SIZE);
 
         List<Transaction> transactions = requester.getUnverified(TRANSACTION_BATCH_SIZE);
 
-        List<Transaction> acceptTransactions = new ArrayList<>();
-        List<Transaction> rejectTransactions = new ArrayList<>();
-        for (Transaction transaction : transactions) {
-            if (validator.isLegitimate(transaction)) {
-                //log.info("Legitimate transaction {}", transaction.getId());
-                acceptTransactions.add(transaction);
-            } else {
-                //log.info("Not legitimate transaction {}", transaction.getId());
-                rejectTransactions.add(transaction);
-            }
+        if (transactions.isEmpty()) {
+            log.debug("No transactions to process");
+            return;
         }
-        verifier.verify(acceptTransactions);
-        verifier.reject(rejectTransactions);
+
+        // Process transactions in parallel
+        List<CompletableFuture<TransactionResult>> futures = transactions.stream()
+                .map(transaction -> CompletableFuture.supplyAsync(() -> {
+                    boolean isLegitimate = validator.isLegitimate(transaction);
+                    return new TransactionResult(transaction, isLegitimate);
+                }, executorService))
+                .collect(Collectors.toList());
+
+        // Wait for all validations to complete
+        CompletableFuture<Void> allFutures = CompletableFuture.allOf(
+                futures.toArray(new CompletableFuture[0])
+        );
+
+        // Process results when all validations complete
+        allFutures.thenRun(() -> {
+            List<Transaction> acceptTransactions = new ArrayList<>();
+            List<Transaction> rejectTransactions = new ArrayList<>();
+
+            futures.forEach(future -> {
+                try {
+                    TransactionResult result = future.get();
+                    if (result.isLegitimate()) {
+                        acceptTransactions.add(result.getTransaction());
+                    } else {
+                        rejectTransactions.add(result.getTransaction());
+                    }
+                } catch (Exception e) {
+                    log.error("Error processing transaction", e);
+                }
+            });
+
+            // Submit verification/rejection tasks in parallel
+            if (!acceptTransactions.isEmpty()) {
+                CompletableFuture.runAsync(() -> verifier.verify(acceptTransactions), executorService);
+            }
+
+            if (!rejectTransactions.isEmpty()) {
+                CompletableFuture.runAsync(() -> verifier.reject(rejectTransactions), executorService);
+            }
+        }).join(); // Wait for processing to complete before ending the scheduled method
+    }
+
+    // Helper class to hold validation results
+    private static class TransactionResult {
+        private final Transaction transaction;
+        private final boolean legitimate;
+
+        public TransactionResult(Transaction transaction, boolean legitimate) {
+            this.transaction = transaction;
+            this.legitimate = legitimate;
+        }
+
+        public Transaction getTransaction() {
+            return transaction;
+        }
+
+        public boolean isLegitimate() {
+            return legitimate;
+        }
     }
 }
