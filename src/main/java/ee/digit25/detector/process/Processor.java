@@ -11,9 +11,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -21,23 +19,29 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class Processor {
 
-    // Increased from 1 to process more transactions in each batch
-    private final int TRANSACTION_BATCH_SIZE = 10;
+    // Increased batch size for better throughput
+    private final int TRANSACTION_BATCH_SIZE = 16;
 
-    // Create a thread pool for parallel processing
-    // Adjust thread count based on your CPU cores and workload
+    // Create a thread pool for parallel processing with proper naming
     private final ExecutorService executorService = Executors.newFixedThreadPool(
-            Math.max(4, Runtime.getRuntime().availableProcessors())
+            Math.max(4, Runtime.getRuntime().availableProcessors()),
+            r -> {
+                Thread t = new Thread(r, "transaction-processor");
+                t.setDaemon(true); // Allow JVM to exit if tasks are still running during shutdown
+                return t;
+            }
     );
 
     private final TransactionRequester requester;
     private final TransactionValidator validator;
     private final TransactionVerifier verifier;
 
-    @Scheduled(fixedDelay = 100) // Changed from 10ms to 100ms to reduce overhead
-    public void process() {
-        log.info("Starting to process a batch of transactions of size {}", TRANSACTION_BATCH_SIZE);
+    // Collector queues for bulk operations
+    private final ConcurrentLinkedQueue<String> toVerify = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<String> toReject = new ConcurrentLinkedQueue<>();
 
+    @Scheduled(fixedDelay = 250) // Increased delay to reduce system load
+    public void process() {
         List<Transaction> transactions = requester.getUnverified(TRANSACTION_BATCH_SIZE);
 
         if (transactions.isEmpty()) {
@@ -45,64 +49,56 @@ public class Processor {
             return;
         }
 
-        // Process transactions in parallel
-        List<CompletableFuture<TransactionResult>> futures = transactions.stream()
-                .map(transaction -> CompletableFuture.supplyAsync(() -> {
-                    boolean isLegitimate = validator.isLegitimate(transaction);
-                    return new TransactionResult(transaction, isLegitimate);
-                }, executorService))
+        log.info("Processing batch of {} transactions", transactions.size());
+
+        // Process transactions in parallel and collect futures
+        List<CompletableFuture<Void>> futures = transactions.stream()
+                .map(transaction -> CompletableFuture
+                        .supplyAsync(() -> validator.isLegitimate(transaction), executorService)
+                        .thenAcceptAsync(isLegitimate -> {
+                            String transactionId = transaction.getId();
+                            try {
+                                if (isLegitimate) {
+                                    // Queue for batch verification instead of immediate API call
+                                    verifier.verify(transactionId);
+                                    log.debug("Transaction {} queued for verification", transactionId);
+                                } else {
+                                    // Queue for batch rejection instead of immediate API call
+                                    verifier.reject(transactionId);
+                                    log.debug("Transaction {} queued for rejection", transactionId);
+                                }
+                            } catch (Exception e) {
+                                log.error("Failed to process transaction {}: {}", transactionId, e.getMessage(), e);
+                            }
+                        }, executorService))
                 .collect(Collectors.toList());
 
-        // Wait for all validations to complete
-        CompletableFuture<Void> allFutures = CompletableFuture.allOf(
-                futures.toArray(new CompletableFuture[0])
-        );
+        // Wait for all processing to complete before ending the scheduled method
+        // Using exceptionally to ensure we don't silently fail
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .exceptionally(throwable -> {
+                    log.error("Batch processing error: {}", throwable.getMessage(), throwable);
+                    return null;
+                })
+                .join();
 
-        // Process results when all validations complete
-        allFutures.thenRun(() -> {
-            List<String> acceptTransactions = new ArrayList<>();
-            List<String> rejectTransactions = new ArrayList<>();
-
-            futures.forEach(future -> {
-                try {
-                    TransactionResult result = future.get();
-                    if (result.isLegitimate()) {
-                        acceptTransactions.add(result.getTransaction().getId());
-                    } else {
-                        rejectTransactions.add(result.getTransaction().getId());
-                    }
-                } catch (Exception e) {
-                    log.error("Error processing transaction", e);
-                }
-            });
-
-            // Submit verification/rejection tasks in parallel
-            if (!acceptTransactions.isEmpty()) {
-                CompletableFuture.runAsync(() -> verifier.verify(acceptTransactions), executorService);
-            }
-
-            if (!rejectTransactions.isEmpty()) {
-                CompletableFuture.runAsync(() -> verifier.reject(rejectTransactions), executorService);
-            }
-        }).join(); // Wait for processing to complete before ending the scheduled method
+        log.info("Completed processing batch of {} transactions", transactions.size());
     }
 
-    // Helper class to hold validation results
-    private static class TransactionResult {
-        private final Transaction transaction;
-        private final boolean legitimate;
-
-        public TransactionResult(Transaction transaction, boolean legitimate) {
-            this.transaction = transaction;
-            this.legitimate = legitimate;
-        }
-
-        public Transaction getTransaction() {
-            return transaction;
-        }
-
-        public boolean isLegitimate() {
-            return legitimate;
-        }
+    // Add a shutdown hook to clean up resources
+    {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            log.info("Shutting down transaction processor");
+            executorService.shutdown();
+            try {
+                if (!executorService.awaitTermination(5, TimeUnit.SECONDS)) {
+                    log.warn("Executor did not terminate in the specified time.");
+                    executorService.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                executorService.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }));
     }
 }

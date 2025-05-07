@@ -1,11 +1,15 @@
 package ee.digit25.detector.domain.account;
 
 import ee.digit25.detector.domain.account.external.AccountRequester;
+import ee.digit25.detector.domain.account.external.api.Account;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
@@ -14,38 +18,69 @@ public class AccountValidator {
 
     private final AccountRequester requester;
 
-    public boolean isValidSenderAccount(String accountNumber, BigDecimal amount, String senderPersonCode) {
-        log.info("Checking if account {} is valid sender account", accountNumber);
+    // Simple cache to reduce redundant API calls
+    // Consider using a proper caching solution like Caffeine for production
+    private final Map<String, CachedAccount> accountCache = new ConcurrentHashMap<>();
 
-        if (isClosed(accountNumber)) {
+    // 5 second cache expiration
+    private static final long CACHE_EXPIRATION_MS = 5000;
+
+    public boolean isValidSenderAccount(String accountNumber, BigDecimal amount, String senderPersonCode) {
+        log.debug("Checking if account {} is valid sender account", accountNumber);
+
+        // Get account details, possibly from cache
+        Account account = getAccount(accountNumber);
+
+        if (account.getClosed()) {
             return false;
-        } else if (!isOwner(accountNumber, senderPersonCode)) {
+        } else if (!senderPersonCode.equals(account.getOwner())) {
             return false;
-        } else return hasBalance(accountNumber, amount);
+        } else {
+            return account.getBalance().compareTo(amount) >= 0;
+        }
     }
 
     public boolean isValidRecipientAccount(String accountNumber, String recipientPersonCode) {
-        log.info("Checking if account {} is valid recipient account", accountNumber);
-        if (isClosed(accountNumber)) {
+        log.debug("Checking if account {} is valid recipient account", accountNumber);
+
+        // Get account details, possibly from cache
+        Account account = getAccount(accountNumber);
+
+        if (account.getClosed()) {
             return false;
-        } else return isOwner(accountNumber, recipientPersonCode);
+        } else {
+            return recipientPersonCode.equals(account.getOwner());
+        }
     }
 
-    private boolean isOwner(String accountNumber, String senderPersonCode) {
-        log.info("Checking if {} is owner of account {}", senderPersonCode, accountNumber);
+    /**
+     * Gets account info with caching to reduce API calls
+     */
+    private Account getAccount(String accountNumber) {
+        CachedAccount cachedAccount = accountCache.get(accountNumber);
+        long now = System.currentTimeMillis();
 
-        return senderPersonCode.equals(requester.get(accountNumber).getOwner());
+        if (cachedAccount != null && (now - cachedAccount.timestamp) < CACHE_EXPIRATION_MS) {
+            log.debug("Cache hit for account {}", accountNumber);
+            return cachedAccount.account;
+        }
+
+        log.debug("Cache miss for account {}, fetching from API", accountNumber);
+        Account account = requester.get(accountNumber);
+        accountCache.put(accountNumber, new CachedAccount(account, now));
+        return account;
     }
 
-    private boolean hasBalance(String accountNumber, BigDecimal amount) {
-        log.info("Checking if account {} has balance for amount {}", accountNumber, amount);
+    /**
+     * Helper class for caching account data with timestamps
+     */
+    private static class CachedAccount {
+        private final Account account;
+        private final long timestamp;
 
-        return requester.get(accountNumber).getBalance().compareTo(amount) >= 0;
-    }
-
-    private boolean isClosed(String accountNumber) {
-        log.info("Checking if account {} is closed", accountNumber);
-
-        return requester.get(accountNumber).getClosed();
+        public CachedAccount(Account account, long timestamp) {
+            this.account = account;
+            this.timestamp = timestamp;
+        }
     }
 }
